@@ -1,199 +1,226 @@
-// ПРИЁМ structuredContent и pizzaTopping из максимально широкого набора мест,
-// чтобы проще тестировать: платформа, postMessage, CustomEvent, URL, data-* и т.п.
+/*! pizzaz-0038.js — fixed
+ *  Changes:
+ *   - Correct source selection before normalizeData (no early truthy {})
+ *   - Listeners installed ASAP to avoid race with structuredContent
+ *   - Robust dataset handling: data-pizza-topping / data-pizzatopping
+ *   - Safer postMessage + CustomEvent ingestion
+ */
+(() => {
+  'use strict';
 
-(function () {
-  const ROOT_ID = 'pizzaz-root';
+  const NS = '[pizzaz]';
+  const ROOT_SELECTOR = '#pizzaz-root';
 
-  function $(sel, root = document) { return root.querySelector(sel); }
+  /** @type {{ pizzaTopping: string|undefined, source: string, _raw: any }} */
+  let state = {
+    pizzaTopping: undefined,
+    source: 'initial',
+    _raw: {}
+  };
 
-  function log(...args) {
-    // Помогает видеть, что реально прилетело
-    console.log('[pizzaz]', ...args);
+  // -------------------- helpers --------------------
+
+  function normalizeData(src) {
+    if (!src || typeof src !== 'object') {
+      return { pizzaTopping: undefined, _raw: {} };
+    }
+    // accept several common key variants
+    let topping =
+      src.pizzaTopping ??
+      src.pizzatopping ??
+      src['pizza-topping'] ??
+      src.topping;
+
+    if (typeof topping === 'string') topping = topping.trim();
+    return { pizzaTopping: topping, _raw: src };
   }
 
-  function safeJsonParse(v, fallback) {
-    try { return JSON.parse(v); } catch { return fallback; }
-  }
+  function readFromGlobals() {
+    // Try a few likely globals used by hosts/platforms
+    const g =
+      (globalThis.__structuredContent && typeof globalThis.__structuredContent === 'object' && globalThis.__structuredContent) ||
+      (globalThis.structuredContent && typeof globalThis.structuredContent === 'object' && globalThis.structuredContent) ||
+      (globalThis.__PIZZAZ__ && typeof globalThis.__PIZZAZ__ === 'object' && globalThis.__PIZZAZ__) ||
+      null;
 
-  function readFromUrl() {
-    const url = new URL(window.location.href);
-    const topping = url.searchParams.get('pizzaTopping');
-    return topping ? { pizzaTopping: topping } : null;
+    if (!g) return null;
+
+    const sc = g && typeof g === 'object' && 'structuredContent' in g && g.structuredContent
+      ? g.structuredContent
+      : g;
+
+    if (sc && typeof sc === 'object' && (
+      'pizzaTopping' in sc || 'pizzatopping' in sc || 'pizza-topping' in sc || 'topping' in sc
+    )) {
+      return sc;
+    }
+    return null;
   }
 
   function readFromDom(rootEl) {
     if (!rootEl) return null;
     const ds = rootEl.dataset || {};
-    if (ds.pizzatopping) return { pizzaTopping: ds.pizzatopping };
-
-    // <script type="application/json" id="structured-content">...</script>
-    const el = document.getElementById('structured-content');
-    if (el && el.textContent) {
-      const json = safeJsonParse(el.textContent, null);
-      if (json && typeof json === 'object') return json;
-    }
+    if ('pizzaTopping' in ds) return { pizzaTopping: ds.pizzaTopping };
+    if ('pizzatopping' in ds) return { pizzaTopping: ds.pizzatopping };
+    if ('topping' in ds)      return { pizzaTopping: ds.topping };
     return null;
   }
 
-  function readFromGlobals() {
-    // Популярные "глобалки", на которые могли положить structuredContent
-    const candidates = [
-      window.__OPENAI_WIDGET__,
-      window.__WIDGET_DATA__,
-      window.__structuredContent,
-      window.openai && window.openai.structuredContent,
-      window.__OPENAI__,
-    ].filter(Boolean);
-
-    for (const c of candidates) {
-      if (c && typeof c === 'object') {
-        // либо целиком structuredContent, либо прямо pizzaTopping на корне
-        if (c.structuredContent && typeof c.structuredContent === 'object') {
-          return c.structuredContent;
-        }
-        if ('pizzaTopping' in c) return { pizzaTopping: c.pizzaTopping };
-      }
-    }
+  function readFromUrl() {
+    try {
+      const p = new URLSearchParams(location.search);
+      if (p.has('pizzaTopping'))  return { pizzaTopping: p.get('pizzaTopping') };
+      if (p.has('pizza-topping')) return { pizzaTopping: p.get('pizza-topping') };
+      if (p.has('topping'))       return { pizzaTopping: p.get('topping') };
+    } catch {}
     return null;
   }
 
-  function normalizeData(data) {
-    if (!data || typeof data !== 'object') return { pizzaTopping: undefined, _raw: {} };
-    const pizzaTopping = data.pizzaTopping ?? data.topping ?? data.pizza ?? undefined;
-    return { pizzaTopping, _raw: data };
-  }
-
+  // Choose source BEFORE normalizing to avoid truthy {} swallowing other sources
   function initialData(rootEl) {
-    // приоритет: платформа/глобалки -> DOM -> URL -> пусто
-    return (
-      normalizeData(readFromGlobals()) ||
-      normalizeData(readFromDom(rootEl)) ||
-      normalizeData(readFromUrl()) ||
-      { pizzaTopping: undefined, _raw: {} }
-    );
+    const src =
+      readFromGlobals() ||
+      readFromDom(rootEl) ||
+      readFromUrl() ||
+      null;
+    return normalizeData(src);
   }
 
-  function render(state) {
-    const root = document.getElementById(ROOT_ID);
-    if (!root) return;
+  function setState(next, source) {
+    const prev = state;
+    state = {
+      pizzaTopping: next.pizzaTopping,
+      source: source || prev.source,
+      _raw: next._raw ?? next
+    };
+    render();
+  }
 
-    const toppingText = state.pizzaTopping ? String(state.pizzaTopping) : '— не задан —';
+  function updateFrom(src, source) {
+    const norm = normalizeData(src);
+    setState(norm, source);
+    console.debug(NS, 'update <-', source, norm);
+  }
 
-    root.innerHTML = `
-      <div class="pz-header">
-        <div class="pz-title">🍕 Pizza Map (demo)</div>
-        <div class="pz-badge">topping</div>
-      </div>
+  // -------------------- listeners --------------------
 
+  function onMessage(ev) {
+    const data = ev?.data;
+    if (!data) return;
+
+    // Prefer explicit structuredContent envelope
+    if (data && typeof data === 'object' && 'structuredContent' in data) {
+      return updateFrom(data.structuredContent, 'postMessage/structuredContent');
+    }
+    // Or accept a plain object with known keys
+    if (typeof data === 'object' && (
+      'pizzaTopping' in data || 'pizzatopping' in data || 'pizza-topping' in data || 'topping' in data
+    )) {
+      return updateFrom(data, 'postMessage');
+    }
+  }
+
+  function onCustomEvent(ev) {
+    const detail = ev?.detail;
+    if (!detail) return;
+    if (detail && typeof detail === 'object' && 'structuredContent' in detail) {
+      updateFrom(detail.structuredContent, 'CustomEvent/structuredContent');
+    } else {
+      updateFrom(detail, 'CustomEvent');
+    }
+  }
+
+  function setupListeners() {
+    // Install ASAP to avoid racing the host's initial message
+    globalThis.addEventListener('message', onMessage);
+    globalThis.addEventListener('pizzaz:structuredContent', onCustomEvent);
+
+    // Debug/escape hatch
+    globalThis.__setPizzaTopping = (t) => updateFrom({ pizzaTopping: t }, 'global');
+    globalThis.__getPizzaState = () => ({ ...state });
+  }
+
+  setupListeners(); // <— install immediately at module eval time
+
+  // -------------------- UI --------------------
+
+  let ui = null;
+
+  function mountUI(root) {
+    root.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.className = 'pz-wrap';
+
+    wrap.innerHTML = `
       <div class="pz-card">
-        <div class="pz-kv">
-          <div class="k">pizzaTopping:</div>
-          <div class="v" id="pz-topping-value">${escapeHtml(toppingText)}</div>
+        <h1>🍕 Pizza Map (demo)</h1>
 
-          <div class="k">source raw:</div>
-          <div class="v"><pre style="margin:0;white-space:pre-wrap">${escapeHtml(JSON.stringify(state._raw ?? {}, null, 2))}</pre></div>
+        <div class="pz-row">
+          <div class="pz-label">topping</div>
+          <div class="pz-value" id="pz-topping">— не задан —</div>
         </div>
 
         <div class="pz-row">
-          <input class="pz-input" id="pz-input" placeholder="введите topping..." value="${escapeAttr(state.pizzaTopping ?? '')}"/>
-          <button class="pz-btn" id="pz-apply">Применить</button>
+          <label for="pz-input" class="pz-label">введите topping...</label>
+          <input id="pz-input" class="pz-input" placeholder="pepperoni" />
+          <button id="pz-apply" class="pz-btn">Применить</button>
         </div>
 
-        <div class="pz-note">
-          Источники: structuredContent от платформы, postMessage/CustomEvent, data-атрибуты, query-параметр.<br/>
+        <details class="pz-details">
+          <summary>source raw:</summary>
+          <pre id="pz-raw">{}</pre>
+        </details>
+
+        <div class="pz-hint">
+          Источники: structuredContent от платформы, postMessage/CustomEvent, data-атрибуты, query-параметр.
           Можно руками: <code>window.__setPizzaTopping('pepperoni')</code>
         </div>
       </div>
     `;
+    root.appendChild(wrap);
 
-    // Локальное изменение, чтобы быстро проверить
-    $('#pz-apply')?.addEventListener('click', () => {
-      const val = $('#pz-input')?.value ?? '';
-      update({ pizzaTopping: val }, 'local');
+    ui = {
+      topping: wrap.querySelector('#pz-topping'),
+      input:   wrap.querySelector('#pz-input'),
+      apply:   wrap.querySelector('#pz-apply'),
+      raw:     wrap.querySelector('#pz-raw')
+    };
+
+    ui.apply.addEventListener('click', () => {
+      const v = ui.input.value.trim();
+      updateFrom({ pizzaTopping: v }, 'input');
     });
   }
 
-  function escapeHtml(s) {
-    return String(s)
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;');
-  }
-  function escapeAttr(s) {
-    return String(s)
-      .replaceAll('&', '&amp;')
-      .replaceAll('"', '&quot;');
-  }
+  function render() {
+    if (!ui) return;
+    const t = state.pizzaTopping;
+    ui.topping.textContent = (t && String(t)) || '— не задан —';
 
-  // Глобальная точка входа для ручного теста
-  window.__setPizzaTopping = function (topping) {
-    update({ pizzaTopping: topping }, 'global');
-  };
-
-  // Обновление состояния из любого источника
-  let STATE = { pizzaTopping: undefined, _raw: {} };
-
-  function update(data, source = 'unknown') {
-    const normalized = normalizeData(data);
-    // Обновляем "сырой" источник для визуализации
-    STATE = { pizzaTopping: normalized.pizzaTopping, _raw: { ...(STATE._raw || {}), ...data, _source: source } };
-    log('update <-', source, STATE);
-    render(STATE);
+    const dbg = {
+      source: state.source,
+      structuredContent: { pizzaTopping: state.pizzaTopping },
+      raw: state._raw
+    };
+    ui.raw.textContent = JSON.stringify(dbg, null, 2);
   }
 
-  // Подписки на разные варианты доставки structuredContent
-  function setupListeners() {
-    // 1) postMessage
-    window.addEventListener('message', (event) => {
-      const d = event?.data;
-      if (!d || typeof d !== 'object') return;
-
-      // часто платформы кладут либо structuredContent, либо прямо ключи
-      if (d.structuredContent && typeof d.structuredContent === 'object') {
-        update(d.structuredContent, 'postMessage.structuredContent');
-      } else if ('pizzaTopping' in d) {
-        update({ pizzaTopping: d.pizzaTopping }, 'postMessage.direct');
-      }
-    });
-
-    // 2) CustomEvent на window/document
-    function ceHandler(e) {
-      const d = e?.detail;
-      if (d && typeof d === 'object') {
-        if (d.structuredContent) update(d.structuredContent, 'CustomEvent.structuredContent');
-        else if ('pizzaTopping' in d) update({ pizzaTopping: d.pizzaTopping }, 'CustomEvent.direct');
-      }
-    }
-    window.addEventListener('openai:structured-content', ceHandler);
-    document.addEventListener('openai:structured-content', ceHandler);
-
-    // 3) Fallback: периодическая проверка глобалок (на случай ленивой инициализации)
-    let polls = 0;
-    const iv = setInterval(() => {
-      polls += 1;
-      const g = readFromGlobals();
-      if (g && g.pizzaTopping !== undefined) {
-        update(g, 'poll.globals');
-        clearInterval(iv);
-      }
-      if (polls > 30) clearInterval(iv);
-    }, 300);
-  }
+  // -------------------- boot --------------------
 
   function boot() {
-    const root = document.getElementById(ROOT_ID);
+    const root = document.querySelector(ROOT_SELECTOR);
     if (!root) {
-      log(`Не найден #${ROOT_ID} — виджет не инициализирован`);
+      console.warn(NS, 'Root element not found:', ROOT_SELECTOR);
       return;
     }
-    STATE = initialData(root);
-    log('initial STATE', STATE);
-    render(STATE);
-    setupListeners();
+    mountUI(root);
+    const init = initialData(root);
+    setState(init, 'initial');
+    console.info(NS, 'initial STATE', state);
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
   } else {
     boot();
   }
