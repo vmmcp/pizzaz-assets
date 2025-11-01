@@ -145,6 +145,7 @@
   // -------------------- UI --------------------
 
   let ui = null;
+  const topping = window.openai?.toolInput?.pizzaTopping ?? '— не задан —';
 
   function mountUI(root) {
     root.innerHTML = '';
@@ -157,7 +158,7 @@
 
         <div class="pz-row">
           <div class="pz-label">topping</div>
-          <div class="pz-value" id="pz-topping">— не задан —</div>
+          <div class="pz-value" id="pz-topping">${topping}</div>
         </div>
 
         <div class="pz-row">
@@ -195,7 +196,7 @@
   function render() {
     if (!ui) return;
     const t = state.pizzaTopping;
-    ui.topping.textContent = (t && String(t)) || '— не задан —';
+    ui.topping.textContent = (t && String(t)) || topping;
 
     const dbg = {
       source: state.source,
