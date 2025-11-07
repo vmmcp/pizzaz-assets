@@ -1,7 +1,7 @@
-// супер-простой показ window.openai.toolInput
+// супер-простой показ window.openai.toolOutput
 (() => {
   // где рисуем
-  const rootId = "toolinput-root";
+  const rootId = "toolOutput-root";
 
   // ждем готовности страницы
   function start() {
@@ -19,11 +19,11 @@
     root.style.padding = "10px";
 
     // получаем данные из openai
-    const data = window.openai?.toolInput;
+    const data = window.openai?.toolOutput;
 
     // если нет данных — пишем
     if (!data) {
-      root.textContent = "нет данных (window.openai.toolInput пуст)";
+      root.textContent = "нет данных (window.openai.toolOutput пуст)";
       return;
     }
 
