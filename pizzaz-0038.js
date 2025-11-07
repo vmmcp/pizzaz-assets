@@ -1,51 +1,64 @@
-// супер-простой показ window.openai.toolOutput
 (() => {
-  // где рисуем
-  const rootId = "toolOutput-root";
+  const ROOT_ID = "toolOutput-root";
 
-  // ждем готовности страницы
-  function start() {
-    // создаём контейнер если его нет
-    let root = document.getElementById(rootId);
+  // ——— helpers ———
+  const ensureRoot = () => {
+    let root = document.getElementById(ROOT_ID);
     if (!root) {
       root = document.createElement("div");
-      root.id = rootId;
+      root.id = ROOT_ID;
       document.body.appendChild(root);
     }
-
-    // стили — только фон и высота
     root.style.background = "white";
     root.style.minHeight = "500px";
     root.style.padding = "10px";
+    return root;
+  };
 
-    // получаем данные из openai
-    const data = window.openai?.toolOutput;
+  const render = () => {
+    const root = ensureRoot();
+    root.innerHTML = ""; // очистка
 
-    // если нет данных — пишем
+    const data = window.openai?.toolOutput ?? null;
+
     if (!data) {
-      root.textContent = "нет данных (window.openai.toolOutput пуст)";
+      root.textContent = "ждём данные… (window.openai.toolOutput пуст)";
       return;
     }
 
-    // делаем список
     const ul = document.createElement("ul");
-
-    for (const key in data) {
-      const value = data[key];
+    for (const key of Object.keys(data)) {
       const li = document.createElement("li");
-      li.textContent = `${key}: ${typeof value === "object"
-        ? JSON.stringify(value)
-        : value}`;
+      const value = data[key];
+      li.textContent = `${key}: ${
+        typeof value === "object" ? JSON.stringify(value) : String(value)
+      }`;
       ul.appendChild(li);
     }
-
-    // вставляем в документ
     root.appendChild(ul);
-  }
+  };
 
-  // запускаем после загрузки DOM
+  // ——— start once DOM is ready ———
+  const start = () => {
+    render(); // первичный рендер (может показать «ждём данные…»)
+
+    // подписка на обновления от хоста ChatGPT
+    const SET_GLOBALS = "openai:set_globals";
+    const onSetGlobals = (evt) => {
+      // перерисовываем только если реально пришло новое toolOutput
+      if (evt?.detail?.globals && "toolOutput" in evt.detail.globals) {
+        render();
+      }
+    };
+    window.addEventListener(SET_GLOBALS, onSetGlobals, { passive: true });
+
+    // на всякий случай дернём рендер ещё раз чуть позже —
+    // полезно, если initial toolOutput прилетит сразу после монтирования
+    setTimeout(render, 0);
+  };
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
+    document.addEventListener("DOMContentLoaded", start, { once: true });
   } else {
     start();
   }
